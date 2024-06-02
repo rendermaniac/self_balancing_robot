@@ -1,15 +1,10 @@
 #include <Bluepad32.h>
 
 #define LED_BUILTIN 33
+#define ALPHA 0.02
 
 GamepadPtr myGamepads[BP32_MAX_GAMEPADS];
-
-int x = 0;
-int y = 0;
-char Pos[10];
 int count = 0;
-
-bool updateNeutral = false;
 
 // This callback gets called any time a new gamepad is connected.
 // Up to 4 gamepads can be connected at the same time.
@@ -19,7 +14,7 @@ void onConnectedGamepad(GamepadPtr gp) {
     if (myGamepads[i] == nullptr) {
       myGamepads[i] = gp;
       foundEmptySlot = true;
-      Serial.println("Gamepad connected");
+      Serial.println("Gamepad connected!");
       break;
     }
   }
@@ -47,18 +42,23 @@ void onDisconnectedGamepad(GamepadPtr gp) {
   }
 }
 
-struct data
+uint8_t syncHeader[] = {0xFA, 0xCE};
+
+struct __attribute__((packed, aligned(1))) data
 {
-  int x;
-  int y;
+  int16_t x;
+  int16_t y;
+  char mode;
+  char dpad;
 };
 
 data d;
 data previous;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   pinMode (LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
   Serial.println("intialising ESP32");
 
   // Setup the Bluepad32 callbacks
@@ -73,72 +73,61 @@ void loop() {
   GamepadPtr myGamepad = myGamepads[0];
   if (myGamepad && myGamepad->isConnected()) {
 
-    if (myGamepad->x()) {
-      // Serial.print("X");
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    int x = myGamepad->axisX();
+    if (x > -15 && x < 15) x = 0;
+
+    int y = myGamepad->axisY();
+    if (y > -15 && y < 15) y = 0;
+
+    d.x = (ALPHA * previous.x) + ((1.0 - ALPHA) * x);
+    d.y = (ALPHA * previous.y) + ((1.0 - ALPHA) * y);
+
+    uint8_t dpad = myGamepad->dpad();  
+    if (dpad == DPAD_UP) d.dpad = 'u';
+    else if (dpad == DPAD_DOWN) d.dpad = 'd';
+    else if (dpad == DPAD_LEFT) d.dpad = 'l';
+    else if (dpad == DPAD_RIGHT) d.dpad = 'r';
+    else d.dpad = ' ';
+
+    if (myGamepad->x()) d.mode = 'x';
+    if (myGamepad->y()) d.mode = 'y';
+    if (myGamepad->b()) d.mode = 'b';
+    if (myGamepad->a()) d.mode = 'a';
+
+
+    if (d.x != previous.x || d.y != previous.y || d.mode != previous.mode || d.dpad != previous.dpad)
+    {
+  
+      // Serial.print("x:");
+      // Serial.print(d.x);
+      // Serial.print(",y:");
+      // Serial.print(d.y);
+      // Serial.print(",mode:");
+      // Serial.print(d.mode);
+      // Serial.print("\n");
+  
+      // write header
+      Serial.write(syncHeader[0]);
+      Serial.write(syncHeader[1]);
+
+      // write data
+      byte buffer[sizeof(data)];
+      memcpy(&buffer, &d, sizeof(data));
+
+      Serial.write(buffer, sizeof(data));
       digitalWrite(LED_BUILTIN, LOW);
-    }
-
-    if (myGamepad->y()) {
-      digitalWrite(LED_BUILTIN, LOW);
-      // Serial.print("Y");
-    }
-
-    if (myGamepad->b()) {
-      digitalWrite(LED_BUILTIN, LOW);
-      // Serial.print("B");
-    }
-
-    if (myGamepad->a()) {
-      digitalWrite(LED_BUILTIN, LOW);
-      // Serial.print("A");
-    }
-
-    // x = myGamepad->axisX(); // (-511 - 512) left X Axis   
-    // if (x < -200) {
-    //   digitalWrite(LED_BUILTIN, LOW);
-    //   Serial.print("L"); // left
-    //   updateNeutral = true;
-    // } else if (x > 200) {
-    //   digitalWrite(LED_BUILTIN, LOW);
-    //   Serial.print("R"); // right
-    //   updateNeutral = true;
-    // }
-
-    // y = myGamepad->axisY(); // (-511 - 512) left Y axis
-    // if (y < -200) {
-    //   digitalWrite(LED_BUILTIN, LOW);
-    //   Serial.print("U"); // forward
-    //   updateNeutral = true;
-    // } else if (y > 200) {
-    //   digitalWrite(LED_BUILTIN, LOW);
-    //   Serial.print("D"); // backward
-    //   updateNeutral = true;
-    // }
-
-    // if (x < 30 && x > -30 && y < 30 && y > -30 && updateNeutral) {
-    //   digitalWrite(LED_BUILTIN, LOW);
-    //   Serial.print("N"); // neutral 
-    //   updateNeutral = false;   
-    // }
-    // Serial.println("x: "+String(x)+"y: "+String(y));
-
-    d.x = myGamepad->axisX();
-    d.y = myGamepad->axisY();
-
-    if (abs(d.x - previous.x) > 20 || abs(d.y - previous.y) > 20 ) {
-      Serial.write((byte*)&d, sizeof(d));
-      digitalWrite(LED_BUILTIN, LOW);
+      
       previous = d;
     }
-  }
 
-   if (count == 0) {
-    digitalWrite(LED_BUILTIN, LOW);
+    if (count == 0) {
+      digitalWrite(LED_BUILTIN, LOW);
+    }
   }
 
   delay(100); // debounce
-
-  digitalWrite(LED_BUILTIN, HIGH);
 
   count += 1;
   if (count >= 20) {

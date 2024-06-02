@@ -10,20 +10,17 @@
 #define RAD2DEG 57.2958
 #define NORMALIZE_1G 16735.0
 
-#define ALPHA 0.001
+// #define ALPHA 0.001
 
-#define MOTOR_COMPENSATION 1.01
+#define SETPOINT_STATIONARY 85.0
+#define SETPOINT_FORWARDS (SETPOINT_STATIONARY + 3.0)
+#define SETPOINT_BACKWARDS (SETPOINT_STATIONARY - 3.0)
 
-#define MODE_M 0
-#define MODE_P 1
-#define MODE_I 2
-#define MODE_D 3
+#define MIN_DRIVE_SIGNAL 0
+#define BITE_DRIVE_SIGNAL 50
+#define MAX_DRIVE_SIGNAL 255
 
-#define SETPOINT_STATIONARY 84.0
-#define SETPOINT_FORWARDS (SETPOINT_STATIONARY + 5.0)
-#define SETPOINT_BACKWARDS (SETPOINT_STATIONARY - 5.0)
-
-unsigned long samplerate = 2.0;
+unsigned long samplerate = 4.0;
 float interval = samplerate / 1000.0;
 
 float gyro_offset = 0.0;
@@ -37,27 +34,38 @@ unsigned long now, previous;
 
 double angle = 0.0;
 double power = 0.0;
-int drive = 0;
-
 double setpoint = SETPOINT_STATIONARY;
 double abortpoint = 30.0;
 bool startPID = false;
 bool abortPID = false;
 
-double kP = 40.0;
-double kI = 250.0;
-double kD = 1.1;
+double kP = 20;
+double kI = 100;
+double kD = 0.3;
 
-int mode = MODE_M;
+int offsetA = 0;
+int offsetB = 0;
 
-int OffsetLeft = 0;
-int OffsetRight = 0;
+float compensationA = 1.15;
+float compensationB = 1.0;
 
 // ESP32
 int rx = 11; // brown
 int tx = 12; // white
 
 SoftwareSerial esp32Serial =  SoftwareSerial(rx, tx);
+
+uint8_t syncHeader[] = {0xFA, 0xCE};
+
+struct __attribute__((packed, aligned(1))) data
+{
+  int16_t x;
+  int16_t y;
+  char mode;
+  char dpad;
+};
+
+data d;
 
 // Motor A
 int enA = 9; // blue
@@ -136,67 +144,67 @@ float compute_complementary_angle(float comp_angle, float d_gyro_angle, float ac
       return comp_angle;
 }
 
-void start_motor()
-{
-  // Turn on motor A
-  digitalWrite(in1, HIGH);
-  digitalWrite(in2, LOW);
-
-  // Turn on motor B
-  digitalWrite(in3, HIGH);
-  digitalWrite(in4, LOW);
-}
-
-void stop_motor()
+void stop_motors()
 {
   analogWrite(enA, 0);
   analogWrite(enB, 0);
 }
 
-void forward(int car_speed, int OffsetLeft, int OffsetRight)
-{  
-  digitalWrite(in1, HIGH);
-  digitalWrite(in2, LOW);  
-  digitalWrite(in3, HIGH);
-  digitalWrite(in4, LOW); 
+void drive_motor(int drive, int h1, int h2, int en)
+{
+  if (drive >= 0) {
+    digitalWrite(h1, HIGH);   // forwards
+    digitalWrite(h2, LOW);
+  } else {
+    digitalWrite(h1, LOW); // backwards
+    digitalWrite(h2, HIGH); 
+  }
 
-  analogWrite(enA, car_speed * MOTOR_COMPENSATION + OffsetLeft);
-  analogWrite(enB, car_speed + OffsetRight);
+  int speed = abs(drive);
+  speed += BITE_DRIVE_SIGNAL;
+  speed = max(speed, MIN_DRIVE_SIGNAL);
+  speed = min(speed, MAX_DRIVE_SIGNAL);
+  analogWrite(en, speed);
 }
 
-void backward(int car_speed, int OffsetLeft, int OffsetRight)
-{ 
-  digitalWrite(in1, LOW);
-  digitalWrite(in2, HIGH);  
-  digitalWrite(in3, LOW);
-  digitalWrite(in4, HIGH); 
+void drive_motorA(int drive)
+{
+  drive_motor(drive, in1, in2, enA);
+}
 
-  analogWrite(enA, car_speed * MOTOR_COMPENSATION + OffsetLeft);
-  analogWrite(enB, car_speed + OffsetRight);
+void drive_motorB(int drive)
+{
+  drive_motor(drive, in3, in4, enB);
 }
 
 void printData() {
   String data;
-  data += "mode:" + String(mode);
-  data += ",P:"  + String(kP);
-  data += ",I:"  + String(kI);
-  data += ",D:"  + String(kD);
-  data += ",setpoint:"  + String(setpoint);
-  data += ",OffsetLeft:"  + String(OffsetLeft);
-  data += ",OffsetRight:" + String(OffsetRight);
-  data += ",angle:" + String(angle);
-  data += ",started:" + String(startPID);
-  data += ",aborted:" + String(abortPID);
+  // data += ",P:"  + String(kP);
+  // data += ",I:"  + String(kI);
+  // data += ",D:"  + String(kD);
+
+  // data += ",compensationA:"  + String(compensationA);
+  // data += ",compensationB:" + String(compensationB);
+
+  data += ",s:"  + String(setpoint);
+  data += ",a:" + String(angle);
+
+  // data += ",oa:"  + String(offsetA);
+  // data += ",ob:" + String(offsetB);
+
+  // data += ",started:" + String(startPID);
+  // data += ",aborted:" + String(abortPID);
   Serial.println(data);
 }
 
 void setup(void) 
 {
   Serial.begin(115200);
-  esp32Serial.begin(115200);
+  esp32Serial.begin(9600);
   Serial.println("\n starting up");
   
   pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH); // turn on until ready
 
   pinMode(enA, OUTPUT);
   pinMode(enB, OUTPUT);
@@ -208,10 +216,9 @@ void setup(void)
   gyro.enableAutoRange(true);
   gyro.begin();
 
-  accel.init();
-  accel.enableDefault();
+  // accel.init();
+  // accel.enableDefault();
 
-  start_motor();
   myPID.SetMode(AUTOMATIC);
   myPID.SetOutputLimits(-255, 255);
   myPID.SetSampleTime(samplerate);
@@ -234,6 +241,49 @@ void loop(void)
   {
     previous = millis();
 
+    if (esp32Serial.available() >= (sizeof(syncHeader) + sizeof(data)) ) {
+      
+      uint16_t sync = (uint16_t)esp32Serial.read() << 8 | esp32Serial.read();
+
+      if (sync == 0xFACE) {
+        byte buffer[sizeof(data)];
+        esp32Serial.readBytes((byte*)&buffer, sizeof(data));
+        memcpy(&d, &buffer, sizeof(data));
+
+        // forwards -y backwards +y
+        setpoint = SETPOINT_STATIONARY - (d.y / 100);
+        offsetA = -d.x / 8.0;
+        offsetB = d.x / 8.0;
+
+        if (d.mode == 'y') {
+          if (d.dpad == 'u') kP += 1;
+          if (d.dpad == 'd') kP -= 1;
+          kP = max(kP, 0.0);
+        }
+
+        if (d.mode == 'x') {
+          if (d.dpad == 'u') kI += 10;
+          if (d.dpad == 'd') kI -= 10;
+          kI = max(kI, 0.0);
+        }
+
+        if (d.mode == 'b') {
+          if (d.dpad == 'u') kD += 0.1;
+          if (d.dpad == 'd') kD -= 0.1;
+          kD = max(kD, 0.0);
+        }
+
+        if (d.mode == 'a') {
+          if (d.dpad == 'u') setpoint += 0.1;
+          if (d.dpad == 'd') setpoint -= 0.1;
+          if (d.dpad == 'l') compensationA += 0.1;
+          if (d.dpad == 'r') compensationB += 0.1;
+        }
+
+        myPID.SetTunings(kP, kI, kD);
+      }
+    }
+
     sensors_event_t event;
     gyro.getEvent(&event);
     float gyro_angle_difference = RAD2DEG * ((event.gyro.x - gyro_offset) * interval);
@@ -243,100 +293,29 @@ void loop(void)
 
     angle += gyro_angle_difference;
     // angle = compute_complementary_angle(angle, gyro_angle_difference, accel_angle, ALPHA);
-
     // Serial.println("min:70.0,max:100.0,setpoint:"+String(setpoint)+",angle:"+String(angle));
 
-  }
-
-  if (angle >= setpoint && !startPID && !abortPID) {
-      Serial.print("PID started \n");
-      startPID = true;
-  }
-
-  if (abs(setpoint - angle) > abortpoint && startPID && !abortPID) {
-      Serial.print("Aborting! \n");
-      startPID = false;
-      abortPID = true;
-  }
-
-  if (esp32Serial.available() > 0) {
-    char command = esp32Serial.read();
-
-    // if (command == 'Y') {
-    //   mode = MODE_P;
-    // } else if (command == 'X') {
-    //   mode = MODE_I;
-    // } else if (command == 'A') {
-    //   mode = MODE_D;
-    // } else if (command == 'B') {
-    //   mode = MODE_M;
-    // }
-
-    // if (mode == MODE_P) {
-    //   if (command == 'U') {
-    //     kP += 1.0;
-    //   } else if (command == 'D') {
-    //     kP -= 1.0;
-    //   }
-    // }
-
-    // if (mode == MODE_I) {
-    //   if (command == 'U') {
-    //     kI += 10.0;
-    //   } else if (command == 'D') {
-    //     kI -= 10.0;
-    //   }
-    // }
-
-    // if (mode == MODE_D) {
-    //   if (command == 'U') {
-    //     kD += 0.1;
-    //   } else if (command == 'D') {
-    //     kD -= 0.1;
-    //   }
-    // }
-
-    if (true) { // mode == MODE_M
-      if (command == 'U') {
-        setpoint = SETPOINT_FORWARDS; // min(setpoint + 0.5, SETPOINT_FORWARDS);
-        Serial.println("forwards setpoint "+String(setpoint));
-      } else if (command == 'D') {
-        setpoint = SETPOINT_BACKWARDS; // max(setpoint - 0.5, SETPOINT_BACKWARDS);
-        Serial.println("backwards setpoint "+String(setpoint));
-      } else if (command == 'L') {
-        OffsetLeft -= 2;
-        OffsetRight += 2;
-      } else if (command == 'R') {
-        OffsetLeft += 2;
-        OffsetRight -= -2;
-      } else if (command == 'N') {
-        float diff = setpoint - SETPOINT_STATIONARY;
-        setpoint -= 0.1 * diff;
-        // setpoint = SETPOINT_STATIONARY;
-        Serial.println("stationary setpoint "+String(setpoint));
-        OffsetLeft = 0;
-        OffsetRight = 0;
-      }
+    if (angle >= setpoint && !startPID && !abortPID) {
+        Serial.print("PID started \n");
+        startPID = true;
     }
 
-  myPID.SetTunings(kP, kI, kD);
-  // printData();
-  }
-
-  if (startPID)
-  { 
-    myPID.Compute();
-
-    drive = round(abs(power));
-    if (drive > 255) drive = 255;
-
-    if (power >= 0) {
-      forward(drive, OffsetLeft, OffsetRight);
-    } else if (power < 0) {
-      backward(drive, OffsetLeft, OffsetRight);
+    if (abs(setpoint - angle) > abortpoint && startPID && !abortPID) {
+        Serial.print("Aborting! \n");
+        startPID = false;
+        abortPID = true;
+        stop_motors();
     }
-  } else {
-    stop_motor();
+    
+    printData();
+
+    if (startPID)
+    { 
+      myPID.Compute();
+
+      drive_motorA(int(power * compensationA) + offsetA);
+      drive_motorB(int(power * compensationB) + offsetB);
+    }
   }
 
 }

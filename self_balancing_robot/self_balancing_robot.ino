@@ -17,7 +17,7 @@
 #define SETPOINT_BACKWARDS (SETPOINT_STATIONARY - 3.0)
 
 #define MIN_DRIVE_SIGNAL 0
-#define BITE_DRIVE_SIGNAL 50
+#define BITE_DRIVE_SIGNAL 40
 #define MAX_DRIVE_SIGNAL 255
 
 unsigned long samplerate = 4.0;
@@ -306,8 +306,8 @@ void loop(void)
         abortPID = true;
         stop_motors();
     }
-    
-    printData();
+
+    // printData();
 
     if (startPID)
     { 

@@ -10,44 +10,43 @@
 #define RAD2DEG 57.2958
 #define NORMALIZE_1G 16735.0
 
-// #define ALPHA 0.001
-
-#define SETPOINT_STATIONARY 85.0
-#define SETPOINT_FORWARDS (SETPOINT_STATIONARY + 3.0)
-#define SETPOINT_BACKWARDS (SETPOINT_STATIONARY - 3.0)
+#define ALPHA 0.001
 
 #define MIN_DRIVE_SIGNAL 0
 #define BITE_DRIVE_SIGNAL 40
 #define MAX_DRIVE_SIGNAL 255
 
-unsigned long samplerate = 4.0;
-float interval = samplerate / 1000.0;
+unsigned long samplerate = 8.0;
+double interval = samplerate / 1000.0;
 
-float gyro_offset = 0.0;
+sensors_event_t gyro_event;
+double gyro_offset = 0.0;
+double gyro_compensation = 0.94; // 0.9562;
 
-float acc_offset = 0.0;
-float ax = 0.0;
-float ay = 0.0;
-float az = 0.0;
+double acc_offset = 0.0;
+double ax = 0.0;
+double ay = 0.0;
+double az = 0.0;
 
 unsigned long now, previous;
 
 double angle = 0.0;
 double power = 0.0;
-double setpoint = SETPOINT_STATIONARY;
+double setpoint_stationary = 79.5;
+double setpoint = setpoint_stationary;
 double abortpoint = 30.0;
 bool startPID = false;
 bool abortPID = false;
 
-double kP = 20;
+double kP = 18; // 20;
 double kI = 100;
 double kD = 0.3;
 
 int offsetA = 0;
 int offsetB = 0;
 
-float compensationA = 1.15;
-float compensationB = 1.0;
+double compensationA = 1.0;
+double compensationB = 1.0;
 
 // ESP32
 int rx = 11; // brown
@@ -91,20 +90,24 @@ void blink_LED(int times, int delayTime)
   }
 }
 
-float calibrate_gyro(Adafruit_L3GD20_Unified *gyroscope, int calibration_samples)
+double get_gyro_anglerate()
 {
-  float offset = 0.0;
-  sensors_event_t event;
+  gyro.getEvent(&gyro_event);
+  return gyro_compensation * RAD2DEG * (gyro_event.gyro.x - gyro_offset);
+}
 
-  for (uint16_t sample = 0; sample < calibration_samples; sample++) {
-    gyroscope->getEvent(&event);
-    offset += float(event.gyro.x);
+double calibrate_gyro(int calibration_samples)
+{
+  double offset = 0.0;
+  for (int sample = 0; sample < calibration_samples; sample++) {
+    gyro.getEvent(&gyro_event);
+    offset += double(gyro_event.gyro.x);
     delay(10);
   }
   return offset / calibration_samples;
 }
 
-void get_accel_data(float& x, float& y, float& z, LSM303 *accelerometer)
+void get_accel_data(double& x, double& y, double& z, LSM303 *accelerometer)
 {
   accelerometer->read();
   x = accelerometer->a.x / NORMALIZE_1G; 
@@ -112,21 +115,21 @@ void get_accel_data(float& x, float& y, float& z, LSM303 *accelerometer)
   z = accelerometer->a.z / NORMALIZE_1G;
 }
 
-float get_accel_angle(float x, float z)
+double get_accel_angle(double x, double z)
 {
-  float angle = RAD2DEG * asin(x / 1.0);
+  double angle = RAD2DEG * asin(x / 1.0);
   if (z > 0.0) angle = 180.0 - angle;
   if (z == 0.0) angle = 90.0;
   return angle;
 }
 
-float calibrate_accel(LSM303 *accelerometer, int calibration_samples)
+double calibrate_accel(LSM303 *accelerometer, int calibration_samples)
 {
-  float offset = 0.0;
+  double offset = 0.0;
 
-  float axx = 0.0;
-  float ayy = 0.0;
-  float azz = 0.0;
+  double axx = 0.0;
+  double ayy = 0.0;
+  double azz = 0.0;
 
   for (uint16_t sample = 0; sample < calibration_samples; sample++) {
     get_accel_data(axx, ayy, azz, accelerometer);
@@ -136,7 +139,7 @@ float calibrate_accel(LSM303 *accelerometer, int calibration_samples)
   return offset / calibration_samples;
 }
 
-float compute_complementary_angle(float comp_angle, float d_gyro_angle, float acc_angle, float alpha)
+double compute_complementary_angle(double comp_angle, double d_gyro_angle, double acc_angle, double alpha)
 {
     if (!isnan(comp_angle) && !isnan(d_gyro_angle) && !isnan(acc_angle))
       return (acc_angle * alpha) + ((1.0 - alpha) * (comp_angle + d_gyro_angle));
@@ -179,13 +182,14 @@ void drive_motorB(int drive)
 
 void printData() {
   String data;
-  // data += ",P:"  + String(kP);
-  // data += ",I:"  + String(kI);
-  // data += ",D:"  + String(kD);
+  data += ",P:"  + String(kP);
+  data += ",I:"  + String(kI);
+  data += ",D:"  + String(kD);
 
   // data += ",compensationA:"  + String(compensationA);
   // data += ",compensationB:" + String(compensationB);
 
+  data += ",x:90.0";
   data += ",s:"  + String(setpoint);
   data += ",a:" + String(angle);
 
@@ -225,7 +229,7 @@ void setup(void)
 
   delay(5000);
   Serial.println("starting calibration");
-  gyro_offset = calibrate_gyro(&gyro, 1000);
+  gyro_offset = calibrate_gyro(1000);
   // acc_offset = calibrate_accel(&accel, 1000);
 
   Serial.print("initialized \n");
@@ -241,6 +245,27 @@ void loop(void)
   {
     previous = millis();
 
+    double gyro_angle_difference = get_gyro_anglerate() * interval;
+
+    // get_accel_data(ax, ay, az, &accel);
+    // double accel_angle = get_accel_angle(ax, az) - acc_offset;
+
+    angle += gyro_angle_difference;
+    // angle = compute_complementary_angle(angle, gyro_angle_difference, accel_angle, ALPHA);
+    // Serial.println("min:70.0,max:100.0,setpoint:"+String(setpoint)+",angle:"+String(angle));
+
+    if (angle >= setpoint && !startPID && !abortPID) {
+        Serial.print("PID started \n");
+        startPID = true;
+    }
+
+    if (abs(setpoint - angle) > abortpoint && startPID && !abortPID) {
+        Serial.print("Aborting! \n");
+        startPID = false;
+        abortPID = true;
+        stop_motors();
+    }
+
     if (esp32Serial.available() >= (sizeof(syncHeader) + sizeof(data)) ) {
       
       uint16_t sync = (uint16_t)esp32Serial.read() << 8 | esp32Serial.read();
@@ -251,9 +276,9 @@ void loop(void)
         memcpy(&d, &buffer, sizeof(data));
 
         // forwards -y backwards +y
-        setpoint = SETPOINT_STATIONARY - (d.y / 100);
-        offsetA = -d.x / 8.0;
-        offsetB = d.x / 8.0;
+        setpoint = setpoint_stationary - (d.y / 150);
+        offsetA = d.x / 16.0;
+        offsetB = -d.x / 16.0;
 
         if (d.mode == 'y') {
           if (d.dpad == 'u') kP += 1;
@@ -274,37 +299,14 @@ void loop(void)
         }
 
         if (d.mode == 'a') {
-          if (d.dpad == 'u') setpoint += 0.1;
-          if (d.dpad == 'd') setpoint -= 0.1;
+          if (d.dpad == 'u') setpoint_stationary += 0.1;
+          if (d.dpad == 'd') setpoint_stationary -= 0.1;
           if (d.dpad == 'l') compensationA += 0.1;
           if (d.dpad == 'r') compensationB += 0.1;
         }
 
         myPID.SetTunings(kP, kI, kD);
       }
-    }
-
-    sensors_event_t event;
-    gyro.getEvent(&event);
-    float gyro_angle_difference = RAD2DEG * ((event.gyro.x - gyro_offset) * interval);
-
-    // get_accel_data(ax, ay, az, &accel);
-    // float accel_angle = get_accel_angle(ax, az) - acc_offset;
-
-    angle += gyro_angle_difference;
-    // angle = compute_complementary_angle(angle, gyro_angle_difference, accel_angle, ALPHA);
-    // Serial.println("min:70.0,max:100.0,setpoint:"+String(setpoint)+",angle:"+String(angle));
-
-    if (angle >= setpoint && !startPID && !abortPID) {
-        Serial.print("PID started \n");
-        startPID = true;
-    }
-
-    if (abs(setpoint - angle) > abortpoint && startPID && !abortPID) {
-        Serial.print("Aborting! \n");
-        startPID = false;
-        abortPID = true;
-        stop_motors();
     }
 
     // printData();

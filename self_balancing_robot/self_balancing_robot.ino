@@ -7,6 +7,7 @@
 #include <LSM303.h>
 #include <PID_v1.h>
 
+#define EPSILON 0.000001
 #define RAD2DEG 57.2958
 #define NORMALIZE_1G 16735.0
 
@@ -34,7 +35,7 @@ double angle = 0.0;
 double power = 0.0;
 double setpoint_stationary = 79.5;
 double setpoint = setpoint_stationary;
-double abortpoint = 30.0;
+double abortpoint = 50.0;
 bool startPID = false;
 bool abortPID = false;
 
@@ -49,8 +50,8 @@ double compensationA = 1.0;
 double compensationB = 1.0;
 
 // ESP32
-int rx = 11; // brown
-int tx = 12; // white
+int rx = 10; // brown
+int tx = 11; // white
 
 SoftwareSerial esp32Serial =  SoftwareSerial(rx, tx);
 
@@ -79,6 +80,11 @@ int in4 = 4; // green
 LSM303 accel;
 Adafruit_L3GD20_Unified gyro = Adafruit_L3GD20_Unified(20);
 PID myPID(&angle, &power, &setpoint, kP, kI, kD, P_ON_M, DIRECT);
+
+int trig = 12; // purple
+int echo = 6; // grey
+int setpoint_distance = 0.0;
+double distance = 0.0;
 
 void blink_LED(int times, int delayTime)
 {
@@ -139,6 +145,19 @@ double calibrate_accel(LSM303 *accelerometer, int calibration_samples)
   return offset / calibration_samples;
 }
 
+double get_distance()
+{
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+
+  long duration = pulseIn(echo, HIGH);
+  return duration * 0.034 / 2;
+}
+
 double compute_complementary_angle(double comp_angle, double d_gyro_angle, double acc_angle, double alpha)
 {
     if (!isnan(comp_angle) && !isnan(d_gyro_angle) && !isnan(acc_angle))
@@ -182,16 +201,19 @@ void drive_motorB(int drive)
 
 void printData() {
   String data;
-  data += ",P:"  + String(kP);
-  data += ",I:"  + String(kI);
-  data += ",D:"  + String(kD);
+  // data += ",P:"  + String(kP);
+  // data += ",I:"  + String(kI);
+  // data += ",D:"  + String(kD);
 
   // data += ",compensationA:"  + String(compensationA);
   // data += ",compensationB:" + String(compensationB);
 
-  data += ",x:90.0";
-  data += ",s:"  + String(setpoint);
-  data += ",a:" + String(angle);
+  // data += ",x:90.0";
+  // data += ",s:"  + String(setpoint);
+  // data += ",a:" + String(angle);
+
+  data += ",ds:" + String(setpoint_distance);
+  data += ",d:" + String(distance);
 
   // data += ",oa:"  + String(offsetA);
   // data += ",ob:" + String(offsetB);
@@ -223,6 +245,9 @@ void setup(void)
   // accel.init();
   // accel.enableDefault();
 
+  pinMode(trig, OUTPUT);
+  pinMode(echo, INPUT);
+
   myPID.SetMode(AUTOMATIC);
   myPID.SetOutputLimits(-255, 255);
   myPID.SetSampleTime(samplerate);
@@ -245,7 +270,11 @@ void loop(void)
   {
     previous = millis();
 
+    distance = get_distance();
     double gyro_angle_difference = get_gyro_anglerate() * interval;
+
+    if (abs(setpoint_distance - distance) < EPSILON)
+      angle = setpoint;
 
     // get_accel_data(ax, ay, az, &accel);
     // double accel_angle = get_accel_angle(ax, az) - acc_offset;
@@ -255,6 +284,7 @@ void loop(void)
     // Serial.println("min:70.0,max:100.0,setpoint:"+String(setpoint)+",angle:"+String(angle));
 
     if (angle >= setpoint && !startPID && !abortPID) {
+        setpoint_distance = distance;
         Serial.print("PID started \n");
         startPID = true;
     }
